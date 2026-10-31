@@ -473,16 +473,18 @@ app = FastAPI(
 )
 
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "https://YOUR-VERCEL-DOMAIN.vercel.app",
+        "https://smart-associate-i57wd049p-naren22k2007-7040.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 
