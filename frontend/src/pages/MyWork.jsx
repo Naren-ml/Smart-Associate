@@ -1,425 +1,116 @@
-import { useState } from "react";
-import {
-  CheckSquare,
-  Plus,
-  Search,
-  Filter,
-  Calendar,
-  Building2,
-  CheckCircle2,
-  Clock,
-  AlertCircle,
-  X,
-  Tag
-} from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { CheckSquare, Plus, Search, Calendar, CheckCircle2, Clock, AlertCircle, X, RefreshCw } from "lucide-react";
+import api, { getApiErrorMessage } from "../services/api";
+import { useAuth } from "../context/AuthContext";
+
+const emptyForm = { title: "", description: "", category: "GST", priority: "Medium", assigned_to: "", due_date: "" };
 
 function MyWork() {
-  const [filter, setFilter] = useState("All");
-  const [searchQuery, setSearchQuery] = useState("");
+  const { user, isManager, isAdmin } = useAuth();
+  const canManage = isManager || isAdmin || ["chief auditor", "chief_auditor"].includes(user?.role?.toLowerCase());
+  const [tasks, setTasks] = useState([]);
+  const [summary, setSummary] = useState({ total: 0, pending: 0, in_progress: 0, completed: 0, overdue: 0 });
+  const [employees, setEmployees] = useState([]);
+  const [filter, setFilter] = useState({ status: "", category: "", priority: "", search: "" });
+  const [sortBy, setSortBy] = useState("newest");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [form, setForm] = useState(emptyForm);
 
-  // Form state for new task
-  const [newTaskTitle, setNewTaskTitle] = useState("");
-  const [newTaskClient, setNewTaskClient] = useState("");
-  const [newTaskCategory, setNewTaskCategory] = useState("GST");
-  const [newTaskPriority, setNewTaskPriority] = useState("Medium");
-  const [newTaskDue, setNewTaskDue] = useState("10 Oct 2026");
+  const loadTasks = useCallback(async () => {
+    setLoading(true); setError("");
+    try {
+      const params = { sort_by: sortBy, limit: 200 };
+      if (filter.status) params.status = filter.status;
+      if (filter.category) params.category = filter.category;
+      if (filter.priority) params.priority = filter.priority;
+      if (filter.search.trim()) params.search = filter.search.trim();
+      const [taskResponse, summaryResponse] = await Promise.all([api.get("/api/tasks", { params }), api.get("/api/tasks/summary")]);
+      setTasks(taskResponse.data.tasks || []); setSummary(summaryResponse.data);
+    } catch (err) { setError(getApiErrorMessage(err)); }
+    finally { setLoading(false); }
+  }, [filter, sortBy]);
 
-  const [tasks, setTasks] = useState([
-    {
-      id: 1,
-      title: "Prepare GST Filing Documents (GSTR-3B & 1)",
-      client: "ABC Enterprises",
-      category: "GST",
-      priority: "High",
-      status: "In Progress",
-      due: "05 Oct 2026",
-    },
-    {
-      id: 2,
-      title: "Verify Form 26AS & TDS Statements",
-      client: "Raj & Co.",
-      category: "TDS",
-      priority: "Medium",
-      status: "Completed",
-      due: "05 Oct 2026",
-    },
-    {
-      id: 3,
-      title: "Update Client Ledger & Journal Entries",
-      client: "Kumar Industries",
-      category: "Accounting",
-      priority: "Low",
-      status: "Pending",
-      due: "06 Oct 2026",
-    },
-    {
-      id: 4,
-      title: "Compile Individual Income Tax Working Papers",
-      client: "Siva Traders",
-      category: "Income Tax",
-      priority: "High",
-      status: "In Progress",
-      due: "07 Oct 2026",
-    },
-    {
-      id: 5,
-      title: "Statutory Audit Supporting Vouchers Check",
-      client: "Green Solutions Pvt Ltd",
-      category: "Audit",
-      priority: "Medium",
-      status: "Pending",
-      due: "08 Oct 2026",
-    },
-  ]);
+  // The loader starts an async request and updates state when it resolves.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { loadTasks(); }, [loadTasks]);
+  useEffect(() => {
+    if (!canManage) return;
+    api.get("/api/tasks/assignees").then((res) => setEmployees(res.data.employees || [])).catch(() => setEmployees([]));
+  }, [canManage]);
 
-  const handleAddTask = (e) => {
-    e.preventDefault();
-    if (!newTaskTitle.trim() || !newTaskClient.trim()) return;
+  const setField = (name, value) => setForm((prev) => ({ ...prev, [name]: value }));
+  const filteredTasks = useMemo(() => tasks, [tasks]);
 
-    const newTask = {
-      id: Date.now(),
-      title: newTaskTitle.trim(),
-      client: newTaskClient.trim(),
-      category: newTaskCategory,
-      priority: newTaskPriority,
-      status: "Pending",
-      due: newTaskDue,
-    };
-
-    setTasks([newTask, ...tasks]);
-    setNewTaskTitle("");
-    setNewTaskClient("");
-    setIsAddModalOpen(false);
+  const submitTask = async (event) => {
+    event.preventDefault(); setSaving(true); setError("");
+    try {
+      await api.post("/api/tasks", { ...form, assigned_to: Number(form.assigned_to), description: form.description || null, due_date: form.due_date || null });
+      setForm(emptyForm); setIsAddModalOpen(false); await loadTasks();
+    } catch (err) { setError(getApiErrorMessage(err)); }
+    finally { setSaving(false); }
   };
 
-  const cycleStatus = (id) => {
-    setTasks((prev) =>
-      prev.map((task) => {
-        if (task.id === id) {
-          const nextStatus =
-            task.status === "Pending"
-              ? "In Progress"
-              : task.status === "In Progress"
-              ? "Completed"
-              : "Pending";
-          return { ...task, status: nextStatus };
-        }
-        return task;
-      })
-    );
+  const setStatus = async (task, nextStatus) => {
+    const previous = tasks;
+    setTasks((items) => items.map((item) => item.id === task.id ? { ...item, status: nextStatus } : item));
+    try { await api.patch(`/api/tasks/${task.id}/status`, { status: nextStatus }); await loadTasks(); }
+    catch (err) { setTasks(previous); setError(getApiErrorMessage(err)); }
   };
 
-  // Metrics
-  const totalCount = tasks.length;
-  const completedCount = tasks.filter((t) => t.status === "Completed").length;
-  const inProgressCount = tasks.filter((t) => t.status === "In Progress").length;
-  const pendingCount = tasks.filter((t) => t.status === "Pending").length;
+  const cards = [
+    { label: "Total Tasks", value: summary.total, icon: CheckSquare, tone: "blue" },
+    { label: "Pending", value: summary.pending, icon: AlertCircle, tone: "purple" },
+    { label: "In Progress", value: summary.in_progress, icon: Clock, tone: "amber" },
+    { label: "Completed", value: summary.completed, icon: CheckCircle2, tone: "emerald" },
+    { label: "Overdue", value: summary.overdue, icon: Calendar, tone: "red" },
+  ];
 
-  const filteredTasks = tasks.filter((task) => {
-    const matchesFilter = filter === "All" || task.status === filter;
-    const matchesSearch =
-      task.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      task.client.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      task.category.toLowerCase().includes(searchQuery.toLowerCase());
-    return matchesFilter && matchesSearch;
-  });
+  const categoryStyle = (category) => ({ GST: ["var(--primary-light)", "var(--primary-blue)"], TDS: ["var(--purple-bg)", "var(--purple)"], Audit: ["var(--success-bg)", "var(--success)"], Accounting: ["var(--info-bg)", "var(--info)"] }[category] || ["var(--bg-subtle)", "var(--text-body)"]);
 
-  const getCategoryColor = (cat) => {
-    switch (cat) {
-      case "GST":
-        return { bg: "var(--primary-light)", color: "var(--primary-blue)" };
-      case "TDS":
-        return { bg: "var(--purple-bg)", color: "var(--purple)" };
-      case "Income Tax":
-        return { bg: "var(--info-bg)", color: "var(--info)" };
-      case "Audit":
-        return { bg: "var(--success-bg)", color: "var(--success)" };
-      default:
-        return { bg: "var(--bg-subtle)", color: "var(--text-body)" };
-    }
-  };
-
-  return (
-    <div className="my-work-page">
-      <div className="module-header">
-        <div className="module-title">
-          <div style={{ display: "inline-flex", alignItems: "center", gap: "6px", color: "var(--primary-blue)", fontSize: "11px", fontWeight: 700, letterSpacing: "1px", textTransform: "uppercase", marginBottom: "4px" }}>
-            <CheckSquare size={13} />
-            <span>PRACTICE WORK TRACKER</span>
-          </div>
-          <h1>My Work &amp; Client Engagements</h1>
-          <p>Assigned audit, GST compliance, tax filings, and partner review queues.</p>
-        </div>
-
-        <button className="btn btn-primary" onClick={() => setIsAddModalOpen(true)}>
-          <Plus size={16} />
-          <span>New Engagement Task</span>
-        </button>
+  return <div className="my-work-page">
+    <div className="module-header">
+      <div className="module-title">
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--primary-blue)", fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}><CheckSquare size={13} /><span>PRACTICE WORK TRACKER</span></div>
+        <h1>My Work &amp; Client Engagements</h1><p>Track assigned practice work, deadlines, and progress.</p>
       </div>
-
-      {/* STATS OVERVIEW */}
-      <div className="stats-grid-4" style={{ marginBottom: "24px" }}>
-        <div className="stat-metric-card">
-          <div className="stat-metric-icon blue">
-            <CheckSquare size={22} />
-          </div>
-          <div className="stat-metric-details">
-            <span className="label">Total Tasks</span>
-            <strong className="value">{totalCount}</strong>
-            <span className="subtext">Assigned engagements</span>
-          </div>
-        </div>
-
-        <div className="stat-metric-card">
-          <div className="stat-metric-icon emerald">
-            <CheckCircle2 size={22} />
-          </div>
-          <div className="stat-metric-details">
-            <span className="label">Completed</span>
-            <strong className="value" style={{ color: "var(--success)" }}>
-              {completedCount}
-            </strong>
-            <span className="subtext">Partner approved</span>
-          </div>
-        </div>
-
-        <div className="stat-metric-card">
-          <div className="stat-metric-icon amber">
-            <Clock size={22} />
-          </div>
-          <div className="stat-metric-details">
-            <span className="label">In Progress</span>
-            <strong className="value" style={{ color: "var(--warning)" }}>
-              {inProgressCount}
-            </strong>
-            <span className="subtext">Active drafting</span>
-          </div>
-        </div>
-
-        <div className="stat-metric-card">
-          <div className="stat-metric-icon purple">
-            <AlertCircle size={22} />
-          </div>
-          <div className="stat-metric-details">
-            <span className="label">Pending Queue</span>
-            <strong className="value" style={{ color: "var(--purple)" }}>
-              {pendingCount}
-            </strong>
-            <span className="subtext">Action required</span>
-          </div>
-        </div>
-      </div>
-
-      {/* FILTER BAR */}
-      <div className="work-filter-bar">
-        <div className="search-input-wrap">
-          <Search size={16} style={{ position: "absolute", left: "12px", color: "var(--text-subtle)" }} />
-          <input
-            type="text"
-            className="search-input"
-            placeholder="Search by client, filing, or tax type..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
-
-        <div className="filter-pills-row">
-          {["All", "Pending", "In Progress", "Completed"].map((status) => (
-            <button
-              key={status}
-              className={`filter-pill-btn ${filter === status ? "active" : ""}`}
-              onClick={() => setFilter(status)}
-            >
-              {status}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* TASKS LIST */}
-      <div className="tasks-list-container">
-        {filteredTasks.map((task) => {
-          const catStyle = getCategoryColor(task.category);
-          return (
-            <div key={task.id} className="task-card-item">
-              <div className="task-card-left">
-                <div
-                  className="task-category-avatar"
-                  style={{ background: catStyle.bg, color: catStyle.color }}
-                >
-                  {task.category.slice(0, 3)}
-                </div>
-
-                <div className="task-card-details">
-                  <h3>{task.title}</h3>
-                  <div style={{ display: "flex", alignItems: "center", gap: "10px", marginTop: "2px" }}>
-                    <span style={{ fontWeight: 600, color: "var(--navy-900)" }}>
-                      {task.client}
-                    </span>
-                    <span>•</span>
-                    <span style={{ color: "var(--text-muted)" }}>{task.category}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="task-card-right">
-                <span
-                  className={`badge ${
-                    task.priority === "High"
-                      ? "badge-red"
-                      : task.priority === "Medium"
-                      ? "badge-amber"
-                      : "badge-slate"
-                  }`}
-                >
-                  {task.priority} Priority
-                </span>
-
-                <button
-                  type="button"
-                  onClick={() => cycleStatus(task.id)}
-                  title="Click to advance status"
-                  style={{ border: "none", background: "transparent", cursor: "pointer" }}
-                >
-                  <span
-                    className={`badge ${
-                      task.status === "Completed"
-                        ? "badge-green"
-                        : task.status === "In Progress"
-                        ? "badge-blue"
-                        : "badge-amber"
-                    }`}
-                  >
-                    {task.status} ↻
-                  </span>
-                </button>
-
-                <div className="due-date-pill">
-                  <Calendar size={14} color="var(--primary-blue)" />
-                  <span>{task.due}</span>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-
-        {filteredTasks.length === 0 && (
-          <div style={{ padding: "48px 24px", textAlign: "center", background: "#ffffff", borderRadius: "var(--radius-lg)", border: "1px solid var(--border-color)", color: "var(--text-muted)" }}>
-            <p style={{ fontSize: "15px", fontWeight: 600 }}>No engagements found</p>
-            <p style={{ fontSize: "13px", marginTop: "4px" }}>
-              Try adjusting your search criteria or add a new engagement task.
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* ADD WORK MODAL DIALOG */}
-      {isAddModalOpen && (
-        <div className="modal-overlay" onClick={() => setIsAddModalOpen(false)}>
-          <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>New Engagement Task</h2>
-              <button
-                className="modal-close-btn"
-                onClick={() => setIsAddModalOpen(false)}
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <form onSubmit={handleAddTask}>
-              <div className="modal-body">
-                <div className="form-group">
-                  <label className="form-label">Task / Engagement Title</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="e.g. Audit Verification for XYZ Pvt Ltd"
-                    value={newTaskTitle}
-                    onChange={(e) => setNewTaskTitle(e.target.value)}
-                    required
-                    style={{ paddingLeft: "14px" }}
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Client Name</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="e.g. ABC Enterprises"
-                    value={newTaskClient}
-                    onChange={(e) => setNewTaskClient(e.target.value)}
-                    required
-                    style={{ paddingLeft: "14px" }}
-                  />
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
-                  <div className="form-group">
-                    <label className="form-label">Category</label>
-                    <select
-                      className="form-input"
-                      value={newTaskCategory}
-                      onChange={(e) => setNewTaskCategory(e.target.value)}
-                      style={{ paddingLeft: "14px", height: "44px" }}
-                    >
-                      <option value="GST">GST Filing</option>
-                      <option value="TDS">TDS Return</option>
-                      <option value="Income Tax">Income Tax</option>
-                      <option value="Audit">Audit Review</option>
-                      <option value="Accounting">Accounting / Bookkeeping</option>
-                    </select>
-                  </div>
-
-                  <div className="form-group">
-                    <label className="form-label">Priority</label>
-                    <select
-                      className="form-input"
-                      value={newTaskPriority}
-                      onChange={(e) => setNewTaskPriority(e.target.value)}
-                      style={{ paddingLeft: "14px", height: "44px" }}
-                    >
-                      <option value="High">High</option>
-                      <option value="Medium">Medium</option>
-                      <option value="Low">Low</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Due Date</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    value={newTaskDue}
-                    onChange={(e) => setNewTaskDue(e.target.value)}
-                    placeholder="e.g. 15 Oct 2026"
-                    style={{ paddingLeft: "14px" }}
-                  />
-                </div>
-              </div>
-
-              <div className="modal-footer">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setIsAddModalOpen(false)}
-                >
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary">
-                  <Plus size={15} />
-                  <span>Assign Task</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {canManage && <button className="btn btn-primary" onClick={() => setIsAddModalOpen(true)}><Plus size={16} /><span>New Task</span></button>}
     </div>
-  );
+
+    <div className="stats-grid-4 task-summary-grid" style={{ marginBottom: 24 }}>
+      {cards.map(({ label, value, icon: Icon, tone }) => <div className="stat-metric-card" key={label}><div className={`stat-metric-icon ${tone}`}><Icon size={22} /></div><div className="stat-metric-details"><span className="label">{label}</span><strong className="value">{value}</strong><span className="subtext">Live from task records</span></div></div>)}
+    </div>
+
+    <div className="work-filter-bar task-filters">
+      <div className="search-input-wrap"><Search size={16} style={{ position: "absolute", left: 12, color: "var(--text-subtle)" }} /><input className="search-input" placeholder="Search tasks or descriptions..." value={filter.search} onChange={(e) => setFilter((f) => ({ ...f, search: e.target.value }))} /></div>
+      <select className="form-input task-filter-select" aria-label="Filter by status" value={filter.status} onChange={(e) => setFilter((f) => ({ ...f, status: e.target.value }))}><option value="">All statuses</option><option>Pending</option><option>In Progress</option><option>Completed</option></select>
+      <select className="form-input task-filter-select" aria-label="Filter by category" value={filter.category} onChange={(e) => setFilter((f) => ({ ...f, category: e.target.value }))}><option value="">All categories</option><option>GST</option><option>TDS</option><option>Audit</option><option>Accounting</option></select>
+      <select className="form-input task-filter-select" aria-label="Filter by priority" value={filter.priority} onChange={(e) => setFilter((f) => ({ ...f, priority: e.target.value }))}><option value="">All priorities</option><option>High</option><option>Medium</option><option>Low</option></select>
+      <select className="form-input task-filter-select" aria-label="Sort tasks" value={sortBy} onChange={(e) => setSortBy(e.target.value)}><option value="newest">Newest</option><option value="upcoming">Upcoming</option><option value="overdue">Overdue</option></select>
+    </div>
+    {error && <div className="task-error" role="alert">{error}<button className="btn btn-secondary" onClick={loadTasks}><RefreshCw size={14} /> Retry</button></div>}
+    <div className="tasks-list-container">
+      {loading ? <div className="task-state">Loading your tasks…</div> : filteredTasks.map((task) => {
+        const [bg, color] = categoryStyle(task.category);
+        const nextStatus = task.status === "Pending" ? "In Progress" : task.status === "In Progress" ? "Completed" : "Pending";
+        return <article key={task.id} className="task-card-item">
+          <div className="task-card-left"><div className="task-category-avatar" style={{ background: bg, color }}>{task.category.slice(0, 3)}</div><div className="task-card-details"><h3>{task.title}</h3><p className="task-description">{task.description || "No additional details"}</p><div className="task-meta-line"><span>{task.category}</span><span>Assigned to {task.assignee?.name || "Unknown"}</span>{task.assigner && <span>By {task.assigner.name}</span>}</div></div></div>
+          <div className="task-card-right"><span className={`badge ${task.priority === "High" ? "badge-red" : task.priority === "Medium" ? "badge-amber" : "badge-slate"}`}>{task.priority} Priority</span><button type="button" className="task-status-button" onClick={() => setStatus(task, nextStatus)} title={`Advance status to ${nextStatus}`}><span className={`badge ${task.status === "Completed" ? "badge-green" : task.status === "In Progress" ? "badge-blue" : "badge-amber"}`}>{task.status} ↻</span></button><div className="due-date-pill"><Calendar size={14} color="var(--primary-blue)" /><span>{task.due_date || "No due date"}{task.is_overdue && <b className="overdue-label"> · Overdue</b>}</span></div></div>
+        </article>;
+      })}
+      {!loading && !error && filteredTasks.length === 0 && <div className="task-state"><strong>No tasks found</strong><p>Try another filter or check back after a task is assigned.</p></div>}
+    </div>
+
+    {isAddModalOpen && <div className="modal-overlay" onClick={() => !saving && setIsAddModalOpen(false)}><div className="modal-dialog" onClick={(e) => e.stopPropagation()}><div className="modal-header"><h2>Assign a Task</h2><button className="modal-close-btn" onClick={() => setIsAddModalOpen(false)} aria-label="Close"><X size={18} /></button></div><form onSubmit={submitTask}><div className="modal-body">
+      <div className="form-group"><label className="form-label" htmlFor="task-title">Task title</label><input id="task-title" className="form-input" minLength={3} maxLength={200} value={form.title} onChange={(e) => setField("title", e.target.value)} required /></div>
+      <div className="form-group"><label className="form-label" htmlFor="task-description">Description</label><textarea id="task-description" className="form-input task-description-input" maxLength={1000} value={form.description} onChange={(e) => setField("description", e.target.value)} /></div>
+      <div className="form-group"><label className="form-label" htmlFor="task-assignee">Assign to</label><select id="task-assignee" className="form-input" value={form.assigned_to} onChange={(e) => setField("assigned_to", e.target.value)} required><option value="">Choose an employee</option>{employees.map((person) => <option key={person.id} value={person.id}>{person.name} · {person.role}</option>)}</select>{employees.length === 0 && <small>No eligible employees are available.</small>}</div>
+      <div className="task-form-grid"><div className="form-group"><label className="form-label" htmlFor="task-category">Category</label><select id="task-category" className="form-input" value={form.category} onChange={(e) => setField("category", e.target.value)}><option>GST</option><option>TDS</option><option>Audit</option><option>Accounting</option></select></div><div className="form-group"><label className="form-label" htmlFor="task-priority">Priority</label><select id="task-priority" className="form-input" value={form.priority} onChange={(e) => setField("priority", e.target.value)}><option>High</option><option>Medium</option><option>Low</option></select></div></div>
+      <div className="form-group"><label className="form-label" htmlFor="task-due">Due date</label><input id="task-due" className="form-input" type="date" value={form.due_date} onChange={(e) => setField("due_date", e.target.value)} /></div>
+    </div><div className="modal-footer"><button type="button" className="btn btn-secondary" onClick={() => setIsAddModalOpen(false)} disabled={saving}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving || employees.length === 0}><Plus size={15} /><span>{saving ? "Assigning…" : "Assign Task"}</span></button></div></form></div></div>}
+  </div>;
 }
 
 export default MyWork;

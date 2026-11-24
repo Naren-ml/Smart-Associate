@@ -8,7 +8,7 @@ from pwdlib import PasswordHash
 from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import (
     create_engine,
     String,
@@ -18,11 +18,14 @@ from sqlalchemy import (
     DateTime,
     desc,
     and_,
+    or_,
+    Index,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
     mapped_column,
+    relationship,
     sessionmaker,
     Session,
 )
@@ -34,6 +37,7 @@ from sqlalchemy.orm import (
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'smart_associate.db')}"
+DATABASE_URL = os.getenv("DATABASE_URL", DATABASE_URL).replace("postgres://", "postgresql://", 1)
 
 SECRET_KEY = os.getenv("SMART_ASSOCIATE_SECRET_KEY")
 
@@ -63,7 +67,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
 )
 
 SessionLocal = sessionmaker(
@@ -115,6 +119,7 @@ class Attendance(Base):
         primary_key=True,
         index=True,
     )
+
 
     employee_id: Mapped[int] = mapped_column(
         Integer,
@@ -175,6 +180,33 @@ class Attendance(Base):
             name="uq_employee_workdate",
         ),
     )
+
+TASK_CATEGORIES = {"GST", "TDS", "Audit", "Accounting"}
+TASK_PRIORITIES = {"High", "Medium", "Low"}
+TASK_STATUSES = {"Pending", "In Progress", "Completed"}
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+    __table_args__ = (
+        Index("ix_tasks_assignee_status_due", "assigned_to", "status", "due_date"),
+        Index("ix_tasks_assigner_created", "assigned_by", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    category: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    priority: Mapped[str] = mapped_column(String(20), nullable=False, default="Medium", index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="Pending", index=True)
+    assigned_to: Mapped[int] = mapped_column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, index=True)
+    assigned_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("employees.id", ondelete="SET NULL"), nullable=True, index=True)
+    due_date: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    assignee: Mapped["Employee"] = relationship(foreign_keys=[assigned_to])
+    assigner: Mapped["Employee | None"] = relationship(foreign_keys=[assigned_by])
 
 
 def get_db():
@@ -285,6 +317,22 @@ def serialize_attendance(att: Attendance, employee: Employee | None = None) -> d
     return data
 
 
+def serialize_task(task: Task) -> dict:
+    today = get_today_date_str()
+    return {
+        "id": task.id, "title": task.title, "description": task.description,
+        "category": task.category, "priority": task.priority, "status": task.status,
+        "assigned_to": task.assigned_to, "assigned_by": task.assigned_by,
+        "due_date": task.due_date,
+        "is_overdue": bool(task.due_date and task.due_date < today and task.status != "Completed"),
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+        "assignee": {"id": task.assignee.id, "name": task.assignee.name, "email": task.assignee.email} if task.assignee else None,
+        "assigner": {"id": task.assigner.id, "name": task.assigner.name} if task.assigner else None,
+    }
+
+
 # --------------------------------------------------
 # REQUEST & RESPONSE SCHEMAS
 # --------------------------------------------------
@@ -300,6 +348,28 @@ class CheckInRequest(BaseModel):
 
 class CheckOutRequest(BaseModel):
     notes: str | None = None
+
+
+class TaskCreateRequest(BaseModel):
+    title: str = Field(..., min_length=3, max_length=200)
+    description: str | None = Field(None, max_length=1000)
+    category: str
+    priority: str = "Medium"
+    assigned_to: int
+    due_date: str | None = None
+
+
+class TaskUpdateRequest(BaseModel):
+    title: str | None = Field(None, min_length=3, max_length=200)
+    description: str | None = Field(None, max_length=1000)
+    category: str | None = None
+    priority: str | None = None
+    assigned_to: int | None = None
+    due_date: str | None = None
+
+
+class TaskStatusUpdateRequest(BaseModel):
+    status: str
 
 
 # --------------------------------------------------
@@ -569,6 +639,158 @@ def get_my_profile(
 # --------------------------------------------------
 # ATTENDANCE ENDPOINTS
 # --------------------------------------------------
+
+def _is_admin(employee: Employee) -> bool:
+    return employee.role.lower() in {"admin", "chief auditor", "chief_auditor"}
+
+
+def _is_manager(employee: Employee) -> bool:
+    return employee.role.lower() == "manager"
+
+
+def _task_scope(employee: Employee, db: Session):
+    query = db.query(Task)
+    if _is_admin(employee):
+        return query
+    if _is_manager(employee):
+        return query.filter(or_(Task.assigned_by == employee.id, Task.assigned_to == employee.id))
+    return query.filter(Task.assigned_to == employee.id)
+
+
+def _require_task_manager(employee: Employee):
+    if not (_is_admin(employee) or _is_manager(employee)):
+        raise HTTPException(status_code=403, detail="Manager or admin role required to manage tasks.")
+
+
+def _validate_task_values(category=None, priority=None, task_status=None, due_date=None):
+    if category is not None and category not in TASK_CATEGORIES:
+        raise HTTPException(status_code=422, detail="Category must be GST, TDS, Audit, or Accounting.")
+    if priority is not None and priority not in TASK_PRIORITIES:
+        raise HTTPException(status_code=422, detail="Priority must be High, Medium, or Low.")
+    if task_status is not None and task_status not in TASK_STATUSES:
+        raise HTTPException(status_code=422, detail="Status must be Pending, In Progress, or Completed.")
+    if due_date is not None:
+        try:
+            datetime.strptime(due_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Due date must be a valid date in YYYY-MM-DD format.")
+
+
+@app.get("/api/tasks/assignees")
+def get_task_assignees(employee: Employee = Depends(get_current_employee), db: Session = Depends(get_db)):
+    _require_task_manager(employee)
+    q = db.query(Employee)
+    if _is_manager(employee):
+        q = q.filter(Employee.role == "staff")
+    return {"employees": [{"id": e.id, "name": e.name, "email": e.email, "role": e.role} for e in q.order_by(Employee.name).all()]}
+
+
+@app.get("/api/tasks/summary")
+def task_summary(employee: Employee = Depends(get_current_employee), db: Session = Depends(get_db)):
+    tasks = _task_scope(employee, db).all()
+    today = get_today_date_str()
+    return {"total": len(tasks), "pending": sum(t.status == "Pending" for t in tasks),
+            "in_progress": sum(t.status == "In Progress" for t in tasks),
+            "completed": sum(t.status == "Completed" for t in tasks),
+            "overdue": sum(bool(t.due_date and t.due_date < today and t.status != "Completed") for t in tasks)}
+
+
+@app.post("/api/tasks", status_code=201)
+def create_task(data: TaskCreateRequest, employee: Employee = Depends(get_current_employee), db: Session = Depends(get_db)):
+    _require_task_manager(employee)
+    _validate_task_values(data.category, data.priority, due_date=data.due_date)
+    assignee = db.get(Employee, data.assigned_to)
+    if not assignee:
+        raise HTTPException(status_code=404, detail="Assigned employee not found.")
+    if _is_manager(employee) and assignee.role.lower() != "staff":
+        raise HTTPException(status_code=403, detail="Managers can assign tasks to staff members only.")
+    now = datetime.now(timezone.utc)
+    task = Task(title=data.title.strip(), description=data.description.strip() if data.description else None,
+                category=data.category, priority=data.priority, assigned_to=assignee.id,
+                assigned_by=employee.id, due_date=data.due_date, created_at=now, updated_at=now)
+    try:
+        db.add(task); db.commit(); db.refresh(task)
+        return {"message": "Task created and assigned successfully.", "task": serialize_task(task)}
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Could not create task. Please try again.")
+
+
+@app.get("/api/tasks")
+def list_tasks(task_status: str | None = Query(None, alias="status"), category: str | None = None,
+               priority: str | None = None, search: str | None = None, sort_by: str = "newest",
+               limit: int = Query(50, ge=1, le=200), skip: int = Query(0, ge=0),
+               employee: Employee = Depends(get_current_employee), db: Session = Depends(get_db)):
+    _validate_task_values(category, priority, task_status)
+    query = _task_scope(employee, db)
+    if task_status: query = query.filter(Task.status == task_status)
+    if category: query = query.filter(Task.category == category)
+    if priority: query = query.filter(Task.priority == priority)
+    if search: query = query.filter(or_(Task.title.ilike(f"%{search.strip()}%"), Task.description.ilike(f"%{search.strip()}%")))
+    today = get_today_date_str()
+    if sort_by == "upcoming": query = query.order_by(Task.due_date.is_(None), Task.due_date.asc(), Task.created_at.desc())
+    elif sort_by == "overdue": query = query.filter(Task.due_date < today, Task.status != "Completed").order_by(Task.due_date.asc())
+    elif sort_by == "newest": query = query.order_by(Task.created_at.desc())
+    else: raise HTTPException(status_code=422, detail="sort_by must be newest, upcoming, or overdue.")
+    total = query.count()
+    rows = query.offset(skip).limit(limit).all()
+    return {"total": total, "count": len(rows), "limit": limit, "skip": skip, "tasks": [serialize_task(t) for t in rows]}
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: int, employee: Employee = Depends(get_current_employee), db: Session = Depends(get_db)):
+    task = _task_scope(employee, db).filter(Task.id == task_id).first()
+    if not task: raise HTTPException(status_code=404, detail="Task not found or you do not have access.")
+    return {"task": serialize_task(task)}
+
+
+@app.put("/api/tasks/{task_id}")
+def update_task(task_id: int, data: TaskUpdateRequest, employee: Employee = Depends(get_current_employee), db: Session = Depends(get_db)):
+    _require_task_manager(employee)
+    task = _task_scope(employee, db).filter(Task.id == task_id).first()
+    if not task: raise HTTPException(status_code=404, detail="Task not found or you do not have access.")
+    _validate_task_values(data.category, data.priority, due_date=data.due_date)
+    if data.assigned_to is not None:
+        assignee = db.get(Employee, data.assigned_to)
+        if not assignee: raise HTTPException(status_code=404, detail="Assigned employee not found.")
+        if _is_manager(employee) and assignee.role.lower() != "staff": raise HTTPException(status_code=403, detail="Managers can assign tasks to staff members only.")
+        task.assigned_to = assignee.id
+    for field in ("title", "description", "category", "priority", "due_date"):
+        value = getattr(data, field)
+        if value is not None: setattr(task, field, value.strip() if field in ("title", "description") and value else value)
+    task.updated_at = datetime.now(timezone.utc)
+    try:
+        db.commit(); db.refresh(task)
+        return {"message": "Task updated successfully.", "task": serialize_task(task)}
+    except Exception:
+        db.rollback(); raise HTTPException(status_code=500, detail="Could not update task. Please try again.")
+
+
+@app.patch("/api/tasks/{task_id}/status")
+def update_task_status(task_id: int, data: TaskStatusUpdateRequest, employee: Employee = Depends(get_current_employee), db: Session = Depends(get_db)):
+    _validate_task_values(task_status=data.status)
+    task = _task_scope(employee, db).filter(Task.id == task_id).first()
+    if not task: raise HTTPException(status_code=404, detail="Task not found or you do not have access.")
+    now = datetime.now(timezone.utc)
+    task.status = data.status; task.updated_at = now
+    task.completed_at = now if data.status == "Completed" else None
+    try:
+        db.commit(); db.refresh(task)
+        return {"message": "Task status updated.", "task": serialize_task(task)}
+    except Exception:
+        db.rollback(); raise HTTPException(status_code=500, detail="Could not update task status. Please try again.")
+
+
+@app.delete("/api/tasks/{task_id}")
+def delete_task(task_id: int, employee: Employee = Depends(get_current_employee), db: Session = Depends(get_db)):
+    _require_task_manager(employee)
+    task = _task_scope(employee, db).filter(Task.id == task_id).first()
+    if not task: raise HTTPException(status_code=404, detail="Task not found or you do not have access.")
+    try:
+        db.delete(task); db.commit()
+        return {"message": "Task deleted successfully."}
+    except Exception:
+        db.rollback(); raise HTTPException(status_code=500, detail="Could not delete task. Please try again.")
 
 @app.post("/api/attendance/check-in")
 def check_in(
