@@ -1,6 +1,6 @@
 import { Navigate, useLocation, Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { Loader2, Building2, ShieldAlert, ArrowLeft } from "lucide-react";
+import { Loader2, ShieldAlert, ArrowLeft } from "lucide-react";
 
 /**
  * Route guard that requires authentication and optionally verifies role-based permissions
@@ -24,8 +24,8 @@ export default function ProtectedRoute({ children, allowedRoles }) {
           fontFamily: "inherit",
         }}
       >
-        <div className="brand-emblem" style={{ width: 44, height: 44 }}>
-          <Building2 size={24} />
+        <div className="brand-emblem brand-emblem-logo" style={{ width: 44, height: 44 }}>
+          <img src="/smart-audit-circle.png" alt="" className="brand-emblem-image" />
         </div>
         <div style={{ textAlign: "center" }}>
           <strong style={{ fontSize: "16px", color: "var(--navy-900)", display: "block" }}>

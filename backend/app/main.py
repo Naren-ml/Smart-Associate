@@ -1,16 +1,20 @@
 import os
 import re
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
 import jwt
 from pwdlib import PasswordHash
-from fastapi import FastAPI, Depends, HTTPException, Query, status
+from fastapi import FastAPI, Depends, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import (
     create_engine,
+    Boolean,
     String,
     Integer,
     ForeignKey,
@@ -20,6 +24,8 @@ from sqlalchemy import (
     and_,
     or_,
     Index,
+    inspect,
+    text,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -99,6 +105,13 @@ class Employee(Base):
         nullable=False,
     )
 
+    user_id: Mapped[str | None] = mapped_column(
+        String(50),
+        unique=True,
+        index=True,
+        nullable=True,
+    )
+
     password_hash: Mapped[str] = mapped_column(
         String(500),
         nullable=False,
@@ -107,6 +120,13 @@ class Employee(Base):
     role: Mapped[str] = mapped_column(
         String(30),
         default="staff",
+        nullable=False,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("true"),
         nullable=False,
     )
 
@@ -207,6 +227,38 @@ class Task(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     assignee: Mapped["Employee"] = relationship(foreign_keys=[assigned_to])
     assigner: Mapped["Employee | None"] = relationship(foreign_keys=[assigned_by])
+
+
+class WorkLog(Base):
+    __tablename__ = "work_logs"
+    __table_args__ = (
+        Index("ix_work_logs_employee_date", "employee_id", "work_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    employee_id: Mapped[int] = mapped_column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, index=True)
+    work_date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(String(2000), nullable=False)
+    minutes_spent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    task_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    task: Mapped["Task | None"] = relationship()
+
+
+class TaskStatusEvent(Base):
+    __tablename__ = "task_status_events"
+    __table_args__ = (
+        Index("ix_task_status_events_employee_time", "employee_id", "changed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    task_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    task_title: Mapped[str] = mapped_column(String(200), nullable=False)
+    employee_id: Mapped[int] = mapped_column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False, index=True)
+    changed_by: Mapped[int] = mapped_column(Integer, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False)
+    from_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    to_status: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
 
 def get_db():
@@ -338,8 +390,26 @@ def serialize_task(task: Task) -> dict:
 # --------------------------------------------------
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    user_id: str | None = None
+    email: EmailStr | None = None
     password: str
+
+
+class StaffCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100)
+    user_id: str = Field(..., min_length=3, max_length=50, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    password: str = Field(..., min_length=10, max_length=128)
+    role: str = Field(default="staff", pattern=r"^(staff|admin)$")
+    email: EmailStr | None = None
+
+
+class StaffUpdateRequest(BaseModel):
+    name: str | None = Field(None, min_length=2, max_length=100)
+    user_id: str | None = Field(None, min_length=3, max_length=50, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    password: str | None = Field(None, min_length=10, max_length=128)
+    role: str | None = Field(None, pattern=r"^(staff|manager|admin)$")
+    email: EmailStr | None = None
+    is_active: bool | None = None
 
 
 class CheckInRequest(BaseModel):
@@ -372,6 +442,13 @@ class TaskStatusUpdateRequest(BaseModel):
     status: str
 
 
+class WorkLogCreateRequest(BaseModel):
+    description: str = Field(..., min_length=3, max_length=2000)
+    work_date: str | None = None
+    minutes_spent: int | None = Field(None, ge=1, le=1440)
+    task_id: int | None = None
+
+
 # --------------------------------------------------
 # SECURITY
 # --------------------------------------------------
@@ -381,6 +458,7 @@ def create_access_token(employee: Employee) -> str:
 
     payload = {
         "sub": str(employee.id),
+        "user_id": employee.user_id,
         "email": employee.email,
         "role": employee.role,
         "iat": now,
@@ -425,6 +503,12 @@ def get_current_employee(
             detail="Employee account not found.",
         )
 
+    if not employee.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="This account is inactive. Contact an administrator.",
+        )
+
     return employee
 
 
@@ -432,47 +516,107 @@ def get_current_employee(
 # STARTUP & SEEDING
 # --------------------------------------------------
 
+def ensure_employee_account_schema():
+    """Adds account-management columns to databases created by older app versions."""
+    columns = {column["name"] for column in inspect(engine).get_columns("employees")}
+
+    with engine.begin() as connection:
+        if "user_id" not in columns:
+            connection.exec_driver_sql("ALTER TABLE employees ADD COLUMN user_id VARCHAR(50)")
+        if "is_active" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE employees ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE"
+            )
+        connection.execute(
+            text("UPDATE employees SET is_active = TRUE WHERE is_active IS NULL")
+        )
+        missing_ids = connection.execute(
+            text("SELECT id FROM employees WHERE user_id IS NULL OR TRIM(user_id) = ''")
+        ).scalars().all()
+        for employee_id in missing_ids:
+            connection.execute(
+                text("UPDATE employees SET user_id = :user_id WHERE id = :employee_id"),
+                {"user_id": f"SA-{employee_id:06d}", "employee_id": employee_id},
+            )
+
+        indexes = {index["name"] for index in inspect(connection).get_indexes("employees")}
+        if "ix_employees_user_id" not in indexes:
+            connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX ix_employees_user_id ON employees (user_id)"
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create all tables safely (idempotent, preserves existing data)
     Base.metadata.create_all(bind=engine)
+    ensure_employee_account_schema()
 
     db = SessionLocal()
 
     try:
-        # 1. Ensure demo accounts for all 3 roles (staff, manager, admin)
-        demo_accounts = [
-            ("Demo Staff", "staff@smartassociate.com", "staff"),
-            ("Priya S.", "manager@smartassociate.com", "manager"),
-            ("CA Aravind", "admin@smartassociate.com", "admin"),
-        ]
-
         staff_employee = None
 
-        for name, email, role in demo_accounts:
-            employee = (
-                db.query(Employee)
-                .filter(Employee.email == email)
-                .first()
-            )
+        if os.getenv("SMART_ASSOCIATE_ENABLE_DEMO_ACCOUNTS", "").lower() == "true":
+            demo_accounts = [
+                ("Demo Staff", "staff@smartassociate.com", "DEMO-STAFF", "staff"),
+                ("Priya S.", "manager@smartassociate.com", "DEMO-MANAGER", "manager"),
+                ("CA Aravind", "admin@smartassociate.com", "DEMO-ADMIN", "admin"),
+            ]
+            for name, email, user_id, role in demo_accounts:
+                employee = db.query(Employee).filter(Employee.email == email).first()
+                if employee is None:
+                    employee = Employee(
+                        name=name,
+                        email=email,
+                        user_id=user_id,
+                        password_hash=password_hasher.hash("123456"),
+                        role=role,
+                    )
+                    db.add(employee)
+                    db.commit()
+                    db.refresh(employee)
+                elif employee.user_id and employee.user_id.startswith("SA-"):
+                    employee.user_id = user_id
+                    db.commit()
+                if email == "staff@smartassociate.com":
+                    staff_employee = employee
 
-            if employee is None:
-                employee = Employee(
-                    name=name,
-                    email=email,
-                    password_hash=password_hasher.hash("123456"),
-                    role=role,
+        active_admin_exists = db.query(Employee).filter(
+            Employee.role == "admin",
+            Employee.is_active.is_(True),
+        ).first()
+        bootstrap_user_id = os.getenv("SMART_ASSOCIATE_BOOTSTRAP_ADMIN_ID", "").strip()
+        bootstrap_password = os.getenv("SMART_ASSOCIATE_BOOTSTRAP_ADMIN_PASSWORD", "")
+        if not active_admin_exists:
+            if (
+                len(bootstrap_password) < 10
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,49}", bootstrap_user_id)
+            ):
+                raise RuntimeError(
+                    "No active admin exists. Set SMART_ASSOCIATE_BOOTSTRAP_ADMIN_ID "
+                    "and SMART_ASSOCIATE_BOOTSTRAP_ADMIN_PASSWORD (10+ characters) "
+                    "to initialize the first administrator."
                 )
-                db.add(employee)
-                db.commit()
-                db.refresh(employee)
-                print(f"Demo {role} account created ({email}).")
+            bootstrap_employee = Employee(
+                name=os.getenv("SMART_ASSOCIATE_BOOTSTRAP_ADMIN_NAME", "Practice Administrator"),
+                user_id=bootstrap_user_id.upper(),
+                email=f"{bootstrap_user_id.lower()}@staff.smartassociate.local",
+                password_hash=password_hasher.hash(bootstrap_password),
+                role="admin",
+                is_active=True,
+            )
+            db.add(bootstrap_employee)
+            db.commit()
+            active_admin_exists = bootstrap_employee
 
-            if email == "staff@smartassociate.com":
-                staff_employee = employee
+        if staff_employee is None:
+            staff_employee = db.query(Employee).filter(
+                Employee.email == "staff@smartassociate.com"
+            ).first()
 
-        # 2. Seed past attendance records for demo staff if none exist
-        if staff_employee:
+        # Seed sample records only alongside explicitly enabled demo accounts.
+        if os.getenv("SMART_ASSOCIATE_ENABLE_DEMO_ACCOUNTS", "").lower() == "true" and staff_employee:
             existing_count = (
                 db.query(Attendance)
                 .filter(Attendance.employee_id == staff_employee.id)
@@ -548,6 +692,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
+        "http://127.0.0.1:5173",
         "https://smart-associate-i57wd049p-naren22k2007-7040.vercel.app",
     ],
     allow_credentials=True,
@@ -593,21 +738,25 @@ def test_api():
 
 @app.post("/api/auth/login")
 def login(data: LoginRequest, db: Session = Depends(get_db)):
-    email = str(data.email).strip().lower()
+    if data.user_id:
+        identity = data.user_id.strip().upper()
+        employee = db.query(Employee).filter(Employee.user_id == identity).first()
+    elif data.email:
+        identity = str(data.email).strip().lower()
+        employee = db.query(Employee).filter(Employee.email == identity).first()
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Enter your User ID and password.",
+        )
 
-    employee = (
-        db.query(Employee)
-        .filter(Employee.email == email)
-        .first()
-    )
-
-    if employee is None or not password_hasher.verify(
+    if employee is None or not employee.is_active or not password_hasher.verify(
         data.password,
         employee.password_hash,
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
+            detail="Invalid User ID or password.",
         )
 
     access_token = create_access_token(employee)
@@ -618,6 +767,7 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         "user": {
             "id": employee.id,
             "name": employee.name,
+            "user_id": employee.user_id,
             "email": employee.email,
             "role": employee.role,
         },
@@ -631,8 +781,10 @@ def get_my_profile(
     return {
         "id": employee.id,
         "name": employee.name,
+        "user_id": employee.user_id,
         "email": employee.email,
         "role": employee.role,
+        "is_active": employee.is_active,
     }
 
 
@@ -660,6 +812,213 @@ def _task_scope(employee: Employee, db: Session):
 def _require_task_manager(employee: Employee):
     if not (_is_admin(employee) or _is_manager(employee)):
         raise HTTPException(status_code=403, detail="Manager or admin role required to manage tasks.")
+
+
+def _is_account_admin(employee: Employee) -> bool:
+    return employee.role.lower() == "admin"
+
+
+def _require_account_admin(employee: Employee):
+    if not _is_account_admin(employee):
+        raise HTTPException(status_code=403, detail="Admin role required.")
+
+
+def serialize_employee(employee: Employee) -> dict:
+    email = employee.email
+    if email and email.endswith("@staff.smartassociate.local"):
+        email = None
+    return {
+        "id": employee.id,
+        "name": employee.name,
+        "user_id": employee.user_id,
+        "email": email,
+        "role": employee.role,
+        "is_active": employee.is_active,
+    }
+
+
+def _employee_email(user_id: str, email: str | None) -> str:
+    if email:
+        return str(email).strip().lower()
+    return f"{user_id.lower()}@staff.smartassociate.local"
+
+
+@app.get("/api/admin/staff")
+def list_staff_accounts(
+    employee: Employee = Depends(get_current_employee),
+    db: Session = Depends(get_db),
+):
+    _require_account_admin(employee)
+    employees = db.query(Employee).order_by(Employee.name, Employee.id).all()
+    return {"employees": [serialize_employee(item) for item in employees]}
+
+
+@app.post("/api/admin/staff", status_code=201)
+def create_staff_account(
+    data: StaffCreateRequest,
+    employee: Employee = Depends(get_current_employee),
+    db: Session = Depends(get_db),
+):
+    _require_account_admin(employee)
+    user_id = data.user_id.strip().upper()
+    email = _employee_email(user_id, data.email)
+    if db.query(Employee).filter(Employee.user_id == user_id).first():
+        raise HTTPException(status_code=409, detail="That User ID is already in use.")
+    if db.query(Employee).filter(Employee.email == email).first():
+        raise HTTPException(status_code=409, detail="That email address is already in use.")
+
+    account = Employee(
+        name=data.name.strip(),
+        user_id=user_id,
+        email=email,
+        password_hash=password_hasher.hash(data.password),
+        role=data.role,
+        is_active=True,
+    )
+    try:
+        db.add(account)
+        db.commit()
+        db.refresh(account)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="User ID or email address is already in use.")
+    return {"message": "Staff account created.", "employee": serialize_employee(account)}
+
+
+@app.patch("/api/admin/staff/{staff_id}")
+def update_staff_account(
+    staff_id: int,
+    data: StaffUpdateRequest,
+    employee: Employee = Depends(get_current_employee),
+    db: Session = Depends(get_db),
+):
+    _require_account_admin(employee)
+    account = db.get(Employee, staff_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Staff account not found.")
+
+    changes = data.model_dump(exclude_unset=True)
+    next_role = changes.get("role", account.role)
+    next_active = changes.get("is_active", account.is_active)
+    if account.role.lower() == "admin" and (next_role != "admin" or not next_active):
+        other_admin = db.query(Employee).filter(
+            Employee.id != account.id,
+            Employee.role == "admin",
+            Employee.is_active.is_(True),
+        ).first()
+        if other_admin is None:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one active admin account must remain.",
+            )
+
+    if "user_id" in changes and changes["user_id"]:
+        user_id = changes["user_id"].strip().upper()
+        duplicate = db.query(Employee).filter(
+            Employee.user_id == user_id,
+            Employee.id != account.id,
+        ).first()
+        if duplicate:
+            raise HTTPException(status_code=409, detail="That User ID is already in use.")
+        account.user_id = user_id
+
+    if "email" in changes:
+        email = _employee_email(account.user_id or f"SA-{account.id:06d}", changes["email"])
+        duplicate = db.query(Employee).filter(
+            Employee.email == email,
+            Employee.id != account.id,
+        ).first()
+        if duplicate:
+            raise HTTPException(status_code=409, detail="That email address is already in use.")
+        account.email = email
+
+    if changes.get("name") is not None:
+        account.name = changes["name"].strip()
+    if changes.get("role") is not None:
+        account.role = changes["role"]
+    if changes.get("is_active") is not None:
+        account.is_active = changes["is_active"]
+    if changes.get("password"):
+        account.password_hash = password_hasher.hash(changes["password"])
+
+    try:
+        db.commit()
+        db.refresh(account)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="User ID or email address is already in use.")
+    return {"message": "Staff account updated.", "employee": serialize_employee(account)}
+
+
+def _validate_iso_date(value: str, field_name: str):
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        raise HTTPException(status_code=422, detail=f"{field_name} must use YYYY-MM-DD format.")
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"{field_name} must be a valid calendar date.")
+
+
+def serialize_work_log(work_log: WorkLog) -> dict:
+    return {
+        "id": work_log.id,
+        "employee_id": work_log.employee_id,
+        "work_date": work_log.work_date,
+        "description": work_log.description,
+        "minutes_spent": work_log.minutes_spent,
+        "task_id": work_log.task_id,
+        "task_title": work_log.task.title if work_log.task else None,
+        "created_at": work_log.created_at.isoformat() if work_log.created_at else None,
+    }
+
+
+@app.get("/api/work-logs")
+def list_work_logs(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = Query(100, ge=1, le=200),
+    employee: Employee = Depends(get_current_employee),
+    db: Session = Depends(get_db),
+):
+    query = db.query(WorkLog).filter(WorkLog.employee_id == employee.id)
+    if start_date:
+        _validate_iso_date(start_date, "start_date")
+        query = query.filter(WorkLog.work_date >= start_date)
+    if end_date:
+        _validate_iso_date(end_date, "end_date")
+        query = query.filter(WorkLog.work_date <= end_date)
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=422, detail="start_date cannot be later than end_date.")
+    records = query.order_by(desc(WorkLog.work_date), desc(WorkLog.created_at)).limit(limit).all()
+    return {"count": len(records), "records": [serialize_work_log(record) for record in records]}
+
+
+@app.post("/api/work-logs", status_code=201)
+def create_work_log(
+    data: WorkLogCreateRequest,
+    employee: Employee = Depends(get_current_employee),
+    db: Session = Depends(get_db),
+):
+    work_date = data.work_date or get_today_date_str()
+    _validate_iso_date(work_date, "work_date")
+    if work_date > get_today_date_str():
+        raise HTTPException(status_code=422, detail="work_date cannot be in the future.")
+    if data.task_id is not None:
+        task = db.get(Task, data.task_id)
+        if task is None or (task.assigned_to != employee.id and not _is_admin(employee)):
+            raise HTTPException(status_code=404, detail="Task not found or you do not have access.")
+
+    record = WorkLog(
+        employee_id=employee.id,
+        work_date=work_date,
+        description=data.description.strip(),
+        minutes_spent=data.minutes_spent,
+        task_id=data.task_id,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"message": "Work log recorded.", "record": serialize_work_log(record)}
 
 
 def _validate_task_values(category=None, priority=None, task_status=None, due_date=None):
@@ -772,8 +1131,19 @@ def update_task_status(task_id: int, data: TaskStatusUpdateRequest, employee: Em
     task = _task_scope(employee, db).filter(Task.id == task_id).first()
     if not task: raise HTTPException(status_code=404, detail="Task not found or you do not have access.")
     now = datetime.now(timezone.utc)
+    previous_status = task.status
     task.status = data.status; task.updated_at = now
     task.completed_at = now if data.status == "Completed" else None
+    if previous_status != data.status:
+        db.add(TaskStatusEvent(
+            task_id=task.id,
+            task_title=task.title,
+            employee_id=task.assigned_to,
+            changed_by=employee.id,
+            from_status=previous_status,
+            to_status=data.status,
+            changed_at=now,
+        ))
     try:
         db.commit(); db.refresh(task)
         return {"message": "Task status updated.", "task": serialize_task(task)}
@@ -791,6 +1161,140 @@ def delete_task(task_id: int, employee: Employee = Depends(get_current_employee)
         return {"message": "Task deleted successfully."}
     except Exception:
         db.rollback(); raise HTTPException(status_code=500, detail="Could not delete task. Please try again.")
+
+
+def _report_date_range(start_date: str | None, end_date: str | None) -> tuple[str, str]:
+    today = get_today_date_str()
+    start = start_date or f"{today[:7]}-01"
+    end = end_date or today
+    _validate_iso_date(start, "start_date")
+    _validate_iso_date(end, "end_date")
+    if start > end:
+        raise HTTPException(status_code=422, detail="start_date cannot be later than end_date.")
+    if (datetime.strptime(end, "%Y-%m-%d") - datetime.strptime(start, "%Y-%m-%d")).days > 365:
+        raise HTTPException(status_code=422, detail="Report date range cannot exceed 366 days.")
+    return start, end
+
+
+def _csv_safe(value) -> str:
+    if value is None:
+        return ""
+    text_value = str(value)
+    if text_value.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return f"'{text_value}"
+    return text_value
+
+
+@app.get("/api/admin/reports.csv")
+def download_staff_audit_report(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    employee: Employee = Depends(get_current_employee),
+    db: Session = Depends(get_db),
+):
+    _require_account_admin(employee)
+    start, end = _report_date_range(start_date, end_date)
+    local_tz = timezone(timedelta(hours=APP_TIMEZONE_OFFSET_HOURS))
+    start_local = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=local_tz)
+    end_local = (
+        datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)
+    ).replace(tzinfo=local_tz)
+    start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
+
+    employees = {item.id: item for item in db.query(Employee).all()}
+    daily = {}
+
+    def row_for(employee_id: int, work_date: str):
+        return daily.setdefault((employee_id, work_date), {
+            "attendance": None,
+            "work": [],
+            "work_minutes": 0,
+            "completed_tasks": set(),
+        })
+
+    for attendance in db.query(Attendance).filter(
+        Attendance.date >= start,
+        Attendance.date <= end,
+    ).all():
+        row_for(attendance.employee_id, attendance.date)["attendance"] = attendance
+
+    for work_log in db.query(WorkLog).filter(
+        WorkLog.work_date >= start,
+        WorkLog.work_date <= end,
+    ).all():
+        row = row_for(work_log.employee_id, work_log.work_date)
+        row["work"].append(work_log.description)
+        row["work_minutes"] += work_log.minutes_spent or 0
+
+    completion_events = db.query(TaskStatusEvent).filter(
+        TaskStatusEvent.to_status == "Completed",
+        TaskStatusEvent.changed_at >= start_utc,
+        TaskStatusEvent.changed_at < end_utc,
+    ).all()
+    for event in completion_events:
+        local_changed_at = to_local_datetime(event.changed_at)
+        row_for(event.employee_id, local_changed_at.strftime("%Y-%m-%d"))[
+            "completed_tasks"
+        ].add(event.task_title)
+
+    # Include completions that predate status-history tracking.
+    for task in db.query(Task).filter(
+        Task.status == "Completed",
+        Task.completed_at.is_not(None),
+        Task.completed_at >= start_utc,
+        Task.completed_at < end_utc,
+    ).all():
+        local_completed_at = to_local_datetime(task.completed_at)
+        row_for(task.assigned_to, local_completed_at.strftime("%Y-%m-%d"))[
+            "completed_tasks"
+        ].add(task.title)
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow([
+        "User ID",
+        "Staff Name",
+        "Role",
+        "Date",
+        "Check In",
+        "Check Out",
+        "Working Minutes",
+        "Attendance Status",
+        "Work Done",
+        "Work Minutes",
+        "Completed Tasks",
+    ])
+    for (employee_id, work_date), details in sorted(
+        daily.items(),
+        key=lambda item: (item[0][1], employees.get(item[0][0]).name if employees.get(item[0][0]) else ""),
+    ):
+        staff_member = employees.get(employee_id)
+        if staff_member is None:
+            continue
+        attendance = details["attendance"]
+        attendance_data = serialize_attendance(attendance) if attendance else {}
+        writer.writerow([
+            _csv_safe(staff_member.user_id),
+            _csv_safe(staff_member.name),
+            _csv_safe(staff_member.role),
+            work_date,
+            attendance_data.get("check_in_time"),
+            attendance_data.get("check_out_time"),
+            attendance_data.get("duration_minutes"),
+            attendance_data.get("status_display"),
+            _csv_safe(" | ".join(details["work"])),
+            details["work_minutes"],
+            _csv_safe(" | ".join(sorted(details["completed_tasks"]))),
+        ])
+
+    filename = f"staff-audit-{start}-to-{end}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 @app.post("/api/attendance/check-in")
 def check_in(

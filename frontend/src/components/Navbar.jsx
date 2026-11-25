@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { Building2, ArrowRight, Lock, Menu, X, LayoutDashboard, UserCheck } from "lucide-react";
+import { ArrowRight, Lock, Menu, X, LayoutDashboard, UserCheck } from "lucide-react";
 
 function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -11,8 +11,8 @@ function Navbar() {
     <>
       <header className="navbar">
         <Link to="/" className="navbar-brand-wrap" aria-label="Smart Associate Home">
-          <div className="brand-emblem">
-            <Building2 size={20} />
+          <div className="brand-emblem brand-emblem-logo">
+            <img src="/smart-audit-circle.png" alt="" className="brand-emblem-image" />
           </div>
           <div className="brand-titles">
             <span className="brand-firm-name">Aravind &amp; Associates</span>

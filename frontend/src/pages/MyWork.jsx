@@ -5,6 +5,11 @@ import { useAuth } from "../context/AuthContext";
 
 const emptyForm = { title: "", description: "", category: "GST", priority: "Medium", assigned_to: "", due_date: "" };
 
+function currentLocalDate() {
+  const date = new Date();
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 function MyWork() {
   const { user, isManager, isAdmin } = useAuth();
   const canManage = isManager || isAdmin || ["chief auditor", "chief_auditor"].includes(user?.role?.toLowerCase());
@@ -18,6 +23,16 @@ function MyWork() {
   const [saving, setSaving] = useState(false);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
+  const [workLogs, setWorkLogs] = useState([]);
+  const [workLogError, setWorkLogError] = useState("");
+  const [workLogSaving, setWorkLogSaving] = useState(false);
+  const [isWorkLogOpen, setIsWorkLogOpen] = useState(false);
+  const [workLogForm, setWorkLogForm] = useState(() => ({
+    work_date: currentLocalDate(),
+    description: "",
+    minutes_spent: "",
+    task_id: "",
+  }));
 
   const loadTasks = useCallback(async () => {
     setLoading(true); setError("");
@@ -36,6 +51,18 @@ function MyWork() {
   // The loader starts an async request and updates state when it resolves.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadTasks(); }, [loadTasks]);
+  const loadWorkLogs = useCallback(async () => {
+    setWorkLogError("");
+    try {
+      const response = await api.get("/api/work-logs", { params: { limit: 50 } });
+      setWorkLogs(response.data.records || []);
+    } catch (err) {
+      setWorkLogError(getApiErrorMessage(err));
+    }
+  }, []);
+
+  useEffect(() => { loadWorkLogs(); }, [loadWorkLogs]);
+
   useEffect(() => {
     if (!canManage) return;
     api.get("/api/tasks/assignees").then((res) => setEmployees(res.data.employees || [])).catch(() => setEmployees([]));
@@ -51,6 +78,32 @@ function MyWork() {
       setForm(emptyForm); setIsAddModalOpen(false); await loadTasks();
     } catch (err) { setError(getApiErrorMessage(err)); }
     finally { setSaving(false); }
+  };
+
+  const submitWorkLog = async (event) => {
+    event.preventDefault();
+    setWorkLogSaving(true);
+    setWorkLogError("");
+    try {
+      await api.post("/api/work-logs", {
+        work_date: workLogForm.work_date,
+        description: workLogForm.description.trim(),
+        minutes_spent: workLogForm.minutes_spent ? Number(workLogForm.minutes_spent) : null,
+        task_id: workLogForm.task_id ? Number(workLogForm.task_id) : null,
+      });
+      setWorkLogForm({
+        work_date: currentLocalDate(),
+        description: "",
+        minutes_spent: "",
+        task_id: "",
+      });
+      setIsWorkLogOpen(false);
+      await loadWorkLogs();
+    } catch (err) {
+      setWorkLogError(getApiErrorMessage(err));
+    } finally {
+      setWorkLogSaving(false);
+    }
   };
 
   const setStatus = async (task, nextStatus) => {
@@ -76,12 +129,59 @@ function MyWork() {
         <div style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--primary-blue)", fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }}><CheckSquare size={13} /><span>PRACTICE WORK TRACKER</span></div>
         <h1>My Work &amp; Client Engagements</h1><p>Track assigned practice work, deadlines, and progress.</p>
       </div>
-      {canManage && <button className="btn btn-primary" onClick={() => setIsAddModalOpen(true)}><Plus size={16} /><span>New Task</span></button>}
+      <div className="work-header-actions">
+        <button type="button" className="btn btn-secondary" onClick={() => setIsWorkLogOpen((open) => !open)}>
+          <Clock size={16} /><span>{isWorkLogOpen ? "Close work log" : "Log work"}</span>
+        </button>
+        {canManage && <button className="btn btn-primary" onClick={() => setIsAddModalOpen(true)}><Plus size={16} /><span>New Task</span></button>}
+      </div>
     </div>
 
     <div className="stats-grid-4 task-summary-grid" style={{ marginBottom: 24 }}>
       {cards.map(({ label, value, icon: Icon, tone }) => <div className="stat-metric-card" key={label}><div className={`stat-metric-icon ${tone}`}><Icon size={22} /></div><div className="stat-metric-details"><span className="label">{label}</span><strong className="value">{value}</strong><span className="subtext">Live from task records</span></div></div>)}
     </div>
+
+    {isWorkLogOpen && (
+      <form className="work-log-entry-card" onSubmit={submitWorkLog}>
+        <div className="work-log-entry-heading">
+          <div>
+            <h2>Record completed work</h2>
+            <p>Add a dated work note to your audit trail. Entries are retained for reporting.</p>
+          </div>
+        </div>
+        {workLogError && <div className="task-error" role="alert">{workLogError}</div>}
+        <div className="work-log-form-grid">
+          <label className="form-group">
+            <span className="form-label">Work date</span>
+            <input className="form-input" type="date" value={workLogForm.work_date} max={currentLocalDate()} onChange={(event) => setWorkLogForm((current) => ({ ...current, work_date: event.target.value }))} required />
+          </label>
+          <label className="form-group">
+            <span className="form-label">Time spent <span className="staff-admin-optional">Optional</span></span>
+            <input className="form-input" type="number" min="1" max="1440" placeholder="Minutes" value={workLogForm.minutes_spent} onChange={(event) => setWorkLogForm((current) => ({ ...current, minutes_spent: event.target.value }))} />
+          </label>
+          <label className="form-group">
+            <span className="form-label">Related task <span className="staff-admin-optional">Optional</span></span>
+            <select className="form-input" value={workLogForm.task_id} onChange={(event) => setWorkLogForm((current) => ({ ...current, task_id: event.target.value }))}>
+              <option value="">No task selected</option>
+              {tasks.filter((task) => task.assigned_to === user?.id).map((task) => (
+                <option key={task.id} value={task.id}>{task.title}</option>
+              ))}
+            </select>
+          </label>
+          <label className="form-group work-log-description-field">
+            <span className="form-label">Work completed</span>
+            <textarea className="form-input task-description-input" value={workLogForm.description} onChange={(event) => setWorkLogForm((current) => ({ ...current, description: event.target.value }))} minLength={3} maxLength={2000} placeholder="Summarize the work you completed today..." required />
+          </label>
+        </div>
+        <div className="work-log-entry-actions">
+          <button type="button" className="btn btn-secondary" onClick={() => setIsWorkLogOpen(false)} disabled={workLogSaving}>Cancel</button>
+          <button type="submit" className="btn btn-primary" disabled={workLogSaving}>
+            {workLogSaving ? <RefreshCw className="spin" size={15} /> : <CheckCircle2 size={15} />}
+            <span>{workLogSaving ? "Saving..." : "Save work log"}</span>
+          </button>
+        </div>
+      </form>
+    )}
 
     <div className="work-filter-bar task-filters">
       <div className="search-input-wrap"><Search size={16} style={{ position: "absolute", left: 12, color: "var(--text-subtle)" }} /><input className="search-input" placeholder="Search tasks or descriptions..." value={filter.search} onChange={(e) => setFilter((f) => ({ ...f, search: e.target.value }))} /></div>
@@ -102,6 +202,32 @@ function MyWork() {
       })}
       {!loading && !error && filteredTasks.length === 0 && <div className="task-state"><strong>No tasks found</strong><p>Try another filter or check back after a task is assigned.</p></div>}
     </div>
+
+    <section className="work-log-history">
+      <div className="work-log-history-heading">
+        <div><h2>Recent work logs</h2><p>Daily notes you have recorded</p></div>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={loadWorkLogs}><RefreshCw size={14} /> Refresh</button>
+      </div>
+      {workLogError && !isWorkLogOpen && <div className="task-error" role="alert">{workLogError}<button type="button" className="btn btn-secondary btn-sm" onClick={loadWorkLogs}>Retry</button></div>}
+      {workLogs.length === 0 && !workLogError ? (
+        <div className="task-state">No work logs yet. Record completed work to keep your daily audit trail up to date.</div>
+      ) : (
+        <div className="work-log-list">
+          {workLogs.map((entry) => (
+            <article key={entry.id} className="work-log-item">
+              <div className="work-log-date">{entry.work_date}</div>
+              <div className="work-log-item-content">
+                <p>{entry.description}</p>
+                <div className="task-meta-line">
+                  {entry.task_title && <span>{entry.task_title}</span>}
+                  {entry.minutes_spent && <span>{entry.minutes_spent} minutes</span>}
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
 
     {isAddModalOpen && <div className="modal-overlay" onClick={() => !saving && setIsAddModalOpen(false)}><div className="modal-dialog" onClick={(e) => e.stopPropagation()}><div className="modal-header"><h2>Assign a Task</h2><button className="modal-close-btn" onClick={() => setIsAddModalOpen(false)} aria-label="Close"><X size={18} /></button></div><form onSubmit={submitTask}><div className="modal-body">
       <div className="form-group"><label className="form-label" htmlFor="task-title">Task title</label><input id="task-title" className="form-input" minLength={3} maxLength={200} value={form.title} onChange={(e) => setField("title", e.target.value)} required /></div>

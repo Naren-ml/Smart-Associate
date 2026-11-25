@@ -2,13 +2,11 @@ import { useState, useEffect } from "react";
 import { useNavigate, useLocation, Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import {
-  Mail,
   Lock,
   Eye,
   EyeOff,
   AlertCircle,
   Loader2,
-  Building2,
   ShieldCheck,
   ArrowRight,
   CheckCircle2
@@ -19,7 +17,7 @@ export default function Login() {
   const location = useLocation();
   const { login, isAuthenticated, loading: authLoading } = useAuth();
 
-  const [email, setEmail] = useState("");
+  const [userId, setUserId] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
@@ -39,8 +37,8 @@ export default function Login() {
     event.preventDefault();
     setError("");
 
-    if (!email.trim()) {
-      setError("Please enter your firm email address.");
+    if (!userId.trim()) {
+      setError("Please enter your User ID.");
       return;
     }
 
@@ -52,7 +50,7 @@ export default function Login() {
     setSubmitting(true);
 
     try {
-      const result = await login(email.trim(), password);
+      const result = await login(userId.trim(), password);
 
       if (result.success) {
         // Successful login, navigate to destination
@@ -67,19 +65,13 @@ export default function Login() {
     }
   }
 
-  const fillDemoCredentials = () => {
-    setEmail("staff@smartassociate.com");
-    setPassword("123456");
-    setError("");
-  };
-
   return (
     <div className="login-page-wrap">
       {/* LEFT BRANDING PANEL */}
       <div className="login-brand-panel">
         <div className="login-panel-header">
-          <div className="brand-emblem" style={{ background: "rgba(255,255,255,0.15)", color: "#ffffff" }}>
-            <Building2 size={20} />
+          <div className="brand-emblem brand-emblem-logo">
+            <img src="/smart-audit-circle.png" alt="" className="brand-emblem-image" />
           </div>
           <div>
             <span style={{ fontSize: "16px", fontWeight: 700, color: "#ffffff" }}>Aravind &amp; Associates</span>
@@ -136,27 +128,24 @@ export default function Login() {
               <span>Staff Authentication</span>
             </div>
             <h2>Member Sign In</h2>
-            <p>Enter your firm email and password to access the portal.</p>
+            <p>Enter your User ID and password to access the staff portal.</p>
           </div>
 
           <form onSubmit={handleSubmit} className="login-form" noValidate>
             <div className="form-group">
-              <label htmlFor="email" className="form-label">
-                Firm Email Address
+              <label htmlFor="user-id" className="form-label">
+                User ID
               </label>
-              <div className="input-with-icon">
-                <Mail size={16} className="input-icon-left" />
-                <input
-                  id="email"
-                  type="email"
-                  className="form-input"
-                  placeholder="e.g. staff@smartassociate.com"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  autoComplete="username"
-                  required
-                />
-              </div>
+              <input
+                id="user-id"
+                type="text"
+                className="form-input"
+                placeholder="Enter your staff User ID"
+                value={userId}
+                onChange={(event) => setUserId(event.target.value)}
+                autoComplete="username"
+                required
+              />
             </div>
 
             <div className="form-group">
@@ -212,54 +201,6 @@ export default function Login() {
               )}
             </button>
           </form>
-
-          {/* DEMO CREDENTIALS QUICK FILL CHIPS */}
-          <div className="login-demo-helper" style={{ flexDirection: "column", alignItems: "stretch", gap: "8px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div className="demo-helper-text">
-                <strong>Practice Demo Accounts</strong>
-                <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>Password: 123456</span>
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                style={{ flex: 1, fontSize: "11.5px", padding: "5px 8px" }}
-                onClick={() => {
-                  setEmail("staff@smartassociate.com");
-                  setPassword("123456");
-                  setError("");
-                }}
-              >
-                Staff
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                style={{ flex: 1, fontSize: "11.5px", padding: "5px 8px" }}
-                onClick={() => {
-                  setEmail("manager@smartassociate.com");
-                  setPassword("123456");
-                  setError("");
-                }}
-              >
-                Manager
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                style={{ flex: 1, fontSize: "11.5px", padding: "5px 8px" }}
-                onClick={() => {
-                  setEmail("admin@smartassociate.com");
-                  setPassword("123456");
-                  setError("");
-                }}
-              >
-                Admin (Partner)
-              </button>
-            </div>
-          </div>
 
           <div style={{ textAlign: "center", paddingTop: "8px" }}>
             <Link to="/" className="back-to-home-link">

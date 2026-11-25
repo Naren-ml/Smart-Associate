@@ -5,6 +5,7 @@ import api from "../services/api";
 import Attendance from "./Attendance";
 import MyWork from "./MyWork";
 import TeamChat from "./TeamChat";
+import AdminStaff from "./AdminStaff";
 import {
   LayoutDashboard,
   Clock,
@@ -26,7 +27,8 @@ import {
   TrendingUp,
   FileText,
   ShieldCheck,
-  UserCheck
+  UserCheck,
+  Users
 } from "lucide-react";
 
 function StaffDashboard({ initialTab = "Dashboard" }) {
@@ -79,6 +81,9 @@ function StaffDashboard({ initialTab = "Dashboard" }) {
     { name: "My Work", icon: CheckSquare },
     { name: "Team Chat", icon: MessageSquare },
   ];
+  if (isAdmin) {
+    menuItems.push({ name: "Staff Management", icon: Users });
+  }
 
   const handleLogout = () => {
     logout();
@@ -112,6 +117,10 @@ function StaffDashboard({ initialTab = "Dashboard" }) {
   const firstName = displayName.split(" ")[0];
 
   const renderContent = () => {
+    if (activeMenu === "Staff Management" && isAdmin) {
+      return <AdminStaff />;
+    }
+
     if (activeMenu === "Attendance") {
       return <Attendance />;
     }
@@ -477,8 +486,8 @@ function StaffDashboard({ initialTab = "Dashboard" }) {
       >
         <div className="sidebar-header">
           <div className="sidebar-brand-wrap">
-            <div className="brand-emblem" style={{ width: 34, height: 34 }}>
-              <Building2 size={18} />
+            <div className="brand-emblem brand-emblem-logo" style={{ width: 34, height: 34 }}>
+              <img src="/smart-audit-circle.png" alt="Smart Audit" className="brand-emblem-image" />
             </div>
             {!sidebarCollapsed && (
               <div className="brand-titles">

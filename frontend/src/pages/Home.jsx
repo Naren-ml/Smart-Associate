@@ -260,7 +260,7 @@ function Home() {
           <div className="footer-top">
             <div className="footer-firm-info">
               <div className="footer-logo">
-                <Building2 size={20} color="#93c5fd" />
+                <img src="/smart-audit-circle.png" alt="" className="footer-logo-image" />
                 <span className="footer-firm-title">Aravind &amp; Associates</span>
               </div>
               <p className="footer-firm-desc">

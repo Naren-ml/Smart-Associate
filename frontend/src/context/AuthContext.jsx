@@ -86,12 +86,12 @@ export function AuthProvider({ children }) {
   }, [clearSession]);
 
   /**
-   * Authenticate user with email and password via POST /api/auth/login
+   * Authenticate user with their User ID and password via POST /api/auth/login
    */
-  const login = async (email, password) => {
+  const login = async (userId, password) => {
     try {
       const response = await api.post("/api/auth/login", {
-        email: email.trim().toLowerCase(),
+        user_id: userId.trim().toUpperCase(),
         password,
       });
 
