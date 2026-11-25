@@ -24,7 +24,7 @@ function BackendTest() {
   const testConnection = () => {
     setResult({
       loading: true,
-      message: "Testing connection to http://127.0.0.1:8000/api/health...",
+      message: "Testing connection to the configured API server...",
       success: false,
       latency: null,
     });
@@ -49,7 +49,7 @@ function BackendTest() {
           loading: false,
           message:
             error.message +
-            ". Check that the FastAPI server is running at http://127.0.0.1:8000.",
+            ". Check the FastAPI URL configured for this deployment.",
           success: false,
           latency: null,
         });

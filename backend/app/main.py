@@ -693,6 +693,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://aravindassociatesca.in",
+        "https://www.aravindassociatesca.in",
         "https://smart-associate-i57wd049p-naren22k2007-7040.vercel.app",
     ],
     allow_credentials=True,

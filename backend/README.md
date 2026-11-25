@@ -18,6 +18,12 @@ Demo accounts are disabled by default. For local-only demonstrations, set `SMART
 
 Staff authenticate with User ID and password, record their own attendance and dated work notes, and update assigned task status. Admins can download a CSV report for a date range from **Dashboard → Staff Management**. The report combines attendance duration, work notes, and task-completion history.
 
+## Production frontend and API
+
+The Vercel site serves the frontend only; the FastAPI service must also be deployed to a public Python-capable host. Production builds default to `https://smart-associate.onrender.com`; set `VITE_API_BASE_URL` in Vercel only if the backend URL changes, then redeploy the frontend. Do not set it to `localhost` or `127.0.0.1` for production: those addresses refer to each visitor's own device.
+
+The backend CORS allowlist includes `https://aravindassociatesca.in` and `https://www.aravindassociatesca.in`. After changing backend CORS settings, redeploy or restart the backend. Configure a persistent production database, `SMART_ASSOCIATE_SECRET_KEY`, and the bootstrap administrator variables for a new database; do not rely on the local SQLite database for an ephemeral hosting filesystem.
+
 Run the backend tests from this directory with:
 
 ```powershell
